@@ -1,0 +1,8 @@
+mtid/
+data/
+images/
+runs-230404/
+videos/
+yolo_pretrained_models/
+.DS_Store
+weights/.DS_Store

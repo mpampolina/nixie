@@ -1,0 +1,9 @@
+path: /Users/mpampoli/Documents/repos/nixie/data
+train: images/train
+val: images/test
+
+names:
+  0: car
+  1: bicycle
+  2: bus
+  3: lorry
