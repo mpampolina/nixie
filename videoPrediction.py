@@ -3,87 +3,30 @@ from ultralytics import YOLO
 import cv2
 import math
 import numpy as np
+from deep_sort.deep_sort.tracker import Tracker
+from deep_sort.deep_sort.nn_matching import NearestNeighborDistanceMetric
+from deep_sort.deep_sort.detection import Detection
+from deep_sort.application_util import preprocessing
+from deep_sort.tools import generate_detections as gdet
+import torch
 
 VIDEO_DIR = os.path.join(".", "videos")
-VIDEO_PATH = os.path.join(VIDEO_DIR, "mtid_video_test.mp4")
+VIDEO_PATH = os.path.join(VIDEO_DIR, "mtidVideo_test1.mp4")
 # Output file path (change name if necessary)
 ANNOT_VIDEO_PATH = os.path.join(VIDEO_DIR, "mitd_video_annot3.mp4")
 MODEL_FILE_PATH = os.path.join(".", "weights", "best-230404.pt")
 FPS = 30
-SCORE_THRESHOLD = 0.6
+CONFIDENCE_THRESHOLD = 0.5
 PROXIMITY_THRESHOLD = 30 # pixels
 OFFSET = 7 # pixels
 
-class Vehicle:
-    def __init__(self, id, class_id, x1, y1, x2, y2):
-        self.id = id
-        self.class_id = class_id
-        self.pt1 = (int(x1), int(y1))
-        self.pt2 = (int(x2), int(y2))
-        self.center = (int((x1 + x2)/2), int((y1 + y2)/2))
-    
-    def Update(self, class_id, x1, y1, x2, y2):
-        self.class_id = class_id
-        self.pt1 = (int(x1), int(y1))
-        self.pt2 = (int(x2), int(y2))
-        self.center = (int((x1 + x2)/2), int((y1 + y2)/2))
-
-class VehicleCounter:
-
-    def __init__(self):
-        self.counterID = 0
-        self.VehiclesLastFrame = []
-
-    def Add(self, NewDetections):
-        for x1, y1, x2, y2, score, class_id in NewDetections:
-            self.VehiclesLastFrame.append(Vehicle(self.counterID, class_id, x1, y1, x2, y2))
-            self.counterID += 1
-
-    def ProtectedAdd(self, NewDetections):
-        for x1, y1, x2, y2, score, class_id in NewDetections:
-            if score > SCORE_THRESHOLD:
-                self.VehiclesLastFrame.append(Vehicle(self.counterID, class_id, x1, y1, x2, y2))
-                self.counterID += 1
-    
-    def Attendance(self, vehicle_ids):
-        s = []
-        self.VehiclesLastFrame = [vehicle for vehicle in self.VehiclesLastFrame if vehicle.id in vehicle_ids]
-        for vehicle1 in self.VehiclesLastFrame:
-            duplicate = False
-            for vehicle2 in self.VehiclesLastFrame:
-                if math.hypot(vehicle1.center[0] - vehicle2.center[0], vehicle1.center[1] - vehicle2.center[1]) < 10 and vehicle1.id != vehicle2.id:
-                    duplicate = True
-            if not duplicate:
-                s.append(vehicle1)
-        self.VehiclesLastFrame = s
-        # Simple version, does not clean the memory -> self.VehiclesLastFrame = [vehicle for vehicle in self.VehiclesLastFrame if vehicle.id in vehicle_ids]
-    
-    def Update(self, detections):
-        VehiclesPresent = []
-        NewDetections = detections.copy()
-
-        for vehicle in self.VehiclesLastFrame:
-            vehiclePresent = False
-
-            for detection in detections:
-                x1, y1, x2, y2, score, class_id = detection
-                if score > SCORE_THRESHOLD:
-                    cx = (x1 + x2)/2
-                    cy = (y1 + y2)/2
-                    if math.hypot(vehicle.center[0] - cx, vehicle.center[1] - cy) < PROXIMITY_THRESHOLD:
-                        vehicle.Update(class_id, x1, y1, x2, y2)
-                        vehiclePresent = True
-                        if detection in NewDetections:
-                            NewDetections.remove(detection)
-
-            if vehiclePresent:
-                VehiclesPresent.append(vehicle.id)
-        
-        self.Attendance(VehiclesPresent)
-        self.Add(NewDetections)
 
 
 if __name__ == "__main__":
+
+    metric = NearestNeighborDistanceMetric("cosine", matching_threshold=0.2, budget=None)
+    tracker = Tracker(metric, max_age=30, n_init=2)
+    encoder = gdet.create_box_encoder("./mars-small128.pb", batch_size=1)
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     VideoCapture = cv2.VideoCapture(VIDEO_PATH)
@@ -91,62 +34,65 @@ if __name__ == "__main__":
     classes = {0: "car", 1: "bicycle", 2: "bus", 3: "lorry"} 
 
     ret, frame = VideoCapture.read()
-    vc = VehicleCounter()
-    vc.ProtectedAdd(model(frame)[0].boxes.data.tolist())
     height, width, channels = frame.shape
 
-    VideoWriter = cv2.VideoWriter(ANNOT_VIDEO_PATH, fourcc, 24, (width, height))
+    # VideoWriter = cv2.VideoWriter(ANNOT_VIDEO_PATH, fourcc, 24, (width, height))
 
     ret, frame = VideoCapture.read()
     while True:
 
         if ret:
             # list of ultralytics.yolo.engine.results.Results
-            detections = model(frame)[0].boxes.data.tolist()
+            matrix = model(frame)[0].boxes.data.detach().cpu().numpy()
 
-            vc.Update(detections)
+            mask = matrix[:, 4] >= CONFIDENCE_THRESHOLD
+            matrix = matrix[mask]
+            
+            matrix[:, 2:4] = matrix[:, 2:4] - matrix[:, :2]
+            indices = preprocessing.non_max_suppression(matrix[:, :4], max_bbox_overlap=0.8, scores=matrix[:, -1])
+            matrix = matrix[indices]
+            # featureVector shape: [12, 128]
+            featureVector = encoder(frame, matrix[:, :4])
 
-            for vehicle in vc.VehiclesLastFrame:
+            detections = [Detection(m[:4], m[4], f_vector) for m, f_vector in zip(matrix, featureVector)]
 
+            tracker.predict()
+            tracker.update(detections)
+
+            tracks = []
+            for track in tracker.tracks:
+                if not track.is_confirmed() or track.time_since_update > 1:
+                    continue
+                bbox = track.to_tlbr().astype(int)
+
+                id = track.track_id
+
+                tracks.append((bbox, id))
+
+            for bbox, id in tracks:
                 cv2.rectangle(
                     img=frame, 
-                    pt1=vehicle.pt1, 
-                    pt2=vehicle.pt2, 
+                    pt1=bbox[:2], 
+                    pt2=bbox[2:4], 
                     color=(20, 255, 57), 
                     thickness=2
                 )
                 # add text to image
                 cv2.putText(
                     img=frame, 
-                    text=classes.get(vehicle.class_id), 
-                    org=(vehicle.pt1[0], vehicle.pt1[1]-OFFSET), 
+                    text=str(id), 
+                    org=(bbox[0], bbox[1] - OFFSET), 
                     fontFace=cv2.FONT_HERSHEY_DUPLEX, 
                     fontScale=1,
                     color=(20, 255, 57), # bgr 
                     thickness=3
                 )
-                cv2.circle(
-                    img=frame,
-                    center=(vehicle.center[0], vehicle.center[1]),
-                    radius=5,
-                    color=(0, 0, 255),
-                    thickness=-1
-                )
-                cv2.putText(
-                    img=frame,
-                    text=str(vehicle.id),
-                    org=(vehicle.center[0], vehicle.center[1]-OFFSET),
-                    fontFace=cv2.FONT_HERSHEY_DUPLEX,
-                    fontScale=1, 
-                    color=(0, 0, 255), 
-                    thickness=2
-                )
 
             cv2.imshow("Frame", frame)
-            VideoWriter.write(frame)
+            # # VideoWriter.write(frame)
 
             # If the "esc" key is pressed
-            key = cv2.waitKey(1)
+            key = cv2.waitKey(0)
             if key == 27:
                 break
         
@@ -156,7 +102,7 @@ if __name__ == "__main__":
         ret, frame = VideoCapture.read()
 
     VideoCapture.release()
-    VideoWriter.release()
+    # VideoWriter.release()
     cv2.destroyAllWindows()
 
 

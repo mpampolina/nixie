@@ -6,3 +6,5 @@ videos/
 yolo_pretrained_models/
 .DS_Store
 weights/.DS_Store
+deep_sort/
+mars-small128.pb
