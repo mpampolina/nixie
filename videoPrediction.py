@@ -32,8 +32,19 @@ dir_map = {
 
 def line_equations(input):
     """
-    Return the equations of a line in the form ax + by + c = 0
-    and a matrix corresponding to two points along that line.
+    Return the equations of a line in the form ax + by + c = 0.
+
+    Parameters
+    ----------
+    input : ndarray
+        A 4x4 matrix with each entry referring to a line in the
+        form [x, y, line-length, angle], where the angle is measured
+        in degrees counter-clockwise from the horizontal.
+
+    Returns
+    -------
+    ndarray
+        A 4x3 matrix of 4 equations and 3 coefficients in the form ax+by+c=0
 
     """
     chkpt_tlbr = np.zeros((4, 4))
@@ -52,7 +63,7 @@ def line_equations(input):
     )
     eqns[:, 1] = np.ones(4) * -1
     eqns[:, 2] = chkpt_tlbr[:, 1] - (eqns[:, 0] * chkpt_tlbr[:, 0])
-    return eqns, chkpt_tlbr
+    return eqns
 
 
 def pt_to_line_distance(pt, eqns):
@@ -62,6 +73,25 @@ def pt_to_line_distance(pt, eqns):
 
 
 def checkpoint_endpoints(eqns, res=(1920, 1080)):
+    """
+    Return a pair of points for each equation of the line corresponding
+    to the coordinates at which the line touches the boundary of image.
+
+    Parameters
+    ----------
+    eqns : ndarray
+        A 4x3 matrix of 4 equations and 3 coefficients in the form ax+by+c=0
+    res : tuple
+        The resolution of the image in the form (width, height)
+
+    Returns
+    -------
+    Dict[int: List[Tuple]]
+        Integer keys corresponding to each of the 4 equations linked with
+        a list of coordinates representing the points of intersection
+        between the line equations and the edges of the image.
+
+    """
     bounds = [0, res[1], 0, res[1], 0, res[0], 0, res[0]]
     left = eqns[:, 0] * 0 + eqns[:, 2]
     right = eqns[:, 0] * res[0] + eqns[:, 2]
@@ -101,25 +131,131 @@ def checkpoint_endpoints(eqns, res=(1920, 1080)):
     return points
 
 
+def detection_edges(eqns, res=(1920, 1080)):
+    """
+    Return the coordinates in the form: [xmin, xmax, ymin, ymax]
+    corresponding to the horizontal and vertical axes that if the
+    centerpoint an object (vehicle) falls below or above, will not
+    count towards the traffic counter.
+
+    Parameters
+    ----------
+    eqns : ndarray
+        A 4x3 matrix of 4 equations and 3 coefficients in the form ax+by+c=0
+    res : tuple
+        The resolution of the image in the form (width, height)
+
+    Returns
+    -------
+    ndarray
+        Boundary axes in the form: [xmin, xmax, ymin, ymax]
+
+    """
+    xs = np.zeros((4, 4))
+    ys = np.zeros((4, 4))
+    for i in range(4):
+        for j in range(4):
+            if i != j:
+                xs[i, j] = (eqns[j, 2] - eqns[i, 2]) / (eqns[i, 0] - eqns[j, 0])
+    for i in range(4):
+        for j in range(4):
+            if i != j:
+                ys[i, j] = eqns[i, 0] * xs[i, j] + eqns[i, 2]
+    xs = xs.astype(int)
+    ys = ys.astype(int)
+    mask = (xs < res[0]) & (xs > 0) & (ys < res[1]) & (ys > 0)
+    return np.array([xs[mask].min(), xs[mask].max(), ys[mask].min(), ys[mask].max()])
+
+
+def visualize(frame, tracks, counter, checkpoint_endpoints):
+    legend_dim = [743, 827, 434, 253]
+    hi_light_color = (55, 214, 234)
+    hi_light_color2 = (242, 246, 52)
+    main_color = (195, 129, 32)
+
+    for bbox, id, centerpoint in tracks:
+        cv2.rectangle(
+            img=frame,
+            pt1=bbox[:2],
+            pt2=bbox[2:4],
+            color=hi_light_color,
+            thickness=2,
+        )
+        # add text to image
+        cv2.putText(
+            img=frame,
+            text=str(id),
+            org=(bbox[0], bbox[1] - OFFSET),
+            fontFace=cv2.FONT_HERSHEY_DUPLEX,
+            fontScale=1,
+            color=hi_light_color,  # bgr
+            thickness=3,
+        )
+        cv2.circle(
+            img=frame,
+            center=centerpoint,
+            radius=5,
+            color=hi_light_color,
+            thickness=-1,
+        )
+
+    for pt_idx in range(len(checkpoint_endpoints)):
+        cv2.line(
+            img=frame,
+            pt1=checkpoint_endpoints[pt_idx][0],
+            pt2=checkpoint_endpoints[pt_idx][1],
+            color=hi_light_color2,
+            thickness=3,
+        )
+
+    cv2.rectangle(
+        img=frame,
+        pt1=legend_dim[:2],
+        pt2=(legend_dim[0] + legend_dim[2], legend_dim[1] + legend_dim[3]),
+        color=(246, 249, 250),
+        thickness=-1,
+    )
+    cv2.putText(
+        img=frame,
+        text="NIXIE: Traffic Counter",
+        org=(legend_dim[0] + OFFSET, legend_dim[1] + 30),
+        fontFace=cv2.FONT_HERSHEY_DUPLEX,
+        fontScale=1,
+        color=main_color,
+        thickness=3,
+    )
+    for i, direct in enumerate(["NB", "SB", "EB", "WB"]):
+        cv2.putText(
+            img=frame,
+            text=f"{direct}T: {counter[(direct+'T')]} | {direct}R: {counter[direct+'R']} | {direct}L: {counter[direct+'L']}",
+            org=(legend_dim[0] + OFFSET, legend_dim[1] + 80 + 50 * i),
+            fontFace=cv2.FONT_HERSHEY_DUPLEX,
+            fontScale=1,
+            color=main_color,
+            thickness=3,
+        )
+
+
 def main(eqns, annotVideoPath=None):
     chkpt_endpts = checkpoint_endpoints(eqns)
+    edges = detection_edges(eqns)
 
     counter = {
         "NBU": 0,
         "NBT": 0,
         "NBR": 0,
         "NBL": 0,
-        "SBU": 0, 
+        "SBU": 0,
         "SBT": 0,
-        "SBR": 0, 
+        "SBR": 0,
         "SBL": 0,
-        "EBU": 0, 
+        "EBU": 0,
         "EBT": 0,
-        "EBR": 0, 
+        "EBR": 0,
         "EBL": 0,
-        "WBU": 0, 
+        "WBU": 0,
         "WBT": 0,
-        "WBR": 0, 
+        "WBR": 0,
         "WBL": 0,
     }
 
@@ -173,59 +309,33 @@ def main(eqns, annotVideoPath=None):
 
                 id = track.track_id
 
-                centerpoint = (int(bbox[0]+(bbox[2]-bbox[0])/2), int(bbox[1]+(bbox[3]-bbox[1])/2))
-                if ((centerpoint[0] < 1610) and (centerpoint[0] > 326)) and ((centerpoint[1] < 757) and (centerpoint[1] > 55)):
+                centerpoint = (
+                    int(bbox[0] + (bbox[2] - bbox[0]) / 2),
+                    int(bbox[1] + (bbox[3] - bbox[1]) / 2),
+                )
+                if ((centerpoint[0] < edges[1]) and (centerpoint[0] > edges[0])) and (
+                    (centerpoint[1] < edges[3]) and (centerpoint[1] > edges[2])
+                ):
                     dist = pt_to_line_distance(centerpoint, eqns)
-                    
-                    checkpoint = np.where(dist<5)[0]
+
+                    checkpoint = np.where(dist < 5)[0]
                     if len(checkpoint) > 1:
-                        print("Warning: Multiple checkpoints detected: Only the first one added.")
+                        print(
+                            "Warning: Multiple checkpoints detected: Only the first one added."
+                        )
                     if len(checkpoint) != 0:
                         if approaches[checkpoint[0]] not in track.checkpoints:
                             track.checkpoints.append(approaches[checkpoint[0]])
-                            print(f"Checkpoint: {approaches[checkpoint[0]]} added for vehicle: {id}")
 
                     if len(track.checkpoints) > 1 and not track.counted:
-                        counter[dir_map[track.checkpoints[0]][track.checkpoints[1]]] += 1
+                        counter[
+                            dir_map[track.checkpoints[0]][track.checkpoints[1]]
+                        ] += 1
                         track.counted = True
-                        print(counter)
 
                 tracks.append((bbox, id, centerpoint))
 
-            for bbox, id, centerpoint in tracks:
-                cv2.rectangle(
-                    img=frame,
-                    pt1=bbox[:2],
-                    pt2=bbox[2:4],
-                    color=(20, 255, 57),
-                    thickness=2,
-                )
-                # add text to image
-                cv2.putText(
-                    img=frame,
-                    text=str(id),
-                    org=(bbox[0], bbox[1] - OFFSET),
-                    fontFace=cv2.FONT_HERSHEY_DUPLEX,
-                    fontScale=1,
-                    color=(20, 255, 57),  # bgr
-                    thickness=3,
-                )
-                cv2.circle(
-                    img=frame,
-                    center=centerpoint,
-                    radius=5,
-                    color=(20, 255, 57),
-                    thickness=-1
-                )
-
-            for pt_idx in range(4):
-                cv2.line(
-                    img=frame,
-                    pt1=chkpt_endpts[pt_idx][0],
-                    pt2=chkpt_endpts[pt_idx][1],
-                    color=(0, 0, 255),
-                    thickness=3,
-                )
+            visualize(frame, tracks, counter, chkpt_endpts)
 
             cv2.imshow("Frame", frame)
             if annotVideoPath:
@@ -257,5 +367,5 @@ if __name__ == "__main__":
         ]
     )
 
-    eqns, _ = line_equations(input)
+    eqns = line_equations(input)
     main(eqns)
